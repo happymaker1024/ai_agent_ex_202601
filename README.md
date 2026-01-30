@@ -155,9 +155,27 @@ CrewAI 및 FinanceDataReader로 실시간 분석 가능한 종목:
 - 카카오
 - LG에너지솔루션
 
-## CrewAI 설정 (선택사항)
+## 에이전트 프레임워크 선택
 
-CrewAI를 활용한 실제 AI 분석을 원하시면:
+이 프로젝트는 **CrewAI**와 **LangGraph** 두 가지 에이전트 프레임워크를 지원합니다.
+
+### 프레임워크 전환 방법
+
+`.env` 파일에서 `AGENT_FRAMEWORK` 환경변수를 설정하여 프레임워크를 선택할 수 있습니다:
+
+```bash
+# CrewAI 사용 (기본값)
+AGENT_FRAMEWORK=crewai
+
+# 또는 LangGraph 사용
+AGENT_FRAMEWORK=langgraph
+```
+
+환경변수를 설정하지 않으면 기본값으로 CrewAI가 사용됩니다.
+
+## AI 에이전트 설정 (선택사항)
+
+CrewAI 또는 LangGraph를 활용한 실제 AI 분석을 원하시면:
 
 1. OpenAI API 키 발급: https://platform.openai.com/api-keys
 
@@ -167,9 +185,10 @@ cd backend
 cp .env.example .env
 ```
 
-3. `.env` 파일에 API 키 입력:
+3. `.env` 파일에 API 키와 프레임워크 설정:
 ```
 OPENAI_API_KEY=your-actual-api-key-here
+AGENT_FRAMEWORK=crewai  # 또는 langgraph
 ```
 
 4. 의존성 재설치:
@@ -179,7 +198,14 @@ uv pip install -r requirements.txt
 
 **주의:** OpenAI API 키가 없으면 더미 데이터로 작동합니다.
 
-## CrewAI Agent 시스템
+## Agent 시스템 구조
+
+### CrewAI vs LangGraph
+
+두 프레임워크 모두 동일한 4개 에이전트 구조를 사용합니다:
+
+- **CrewAI**: Task와 Agent 기반의 협업 구조
+- **LangGraph**: StateGraph 기반의 상태 관리 구조
 
 백엔드는 다음 4개의 에이전트가 순차적으로 실행됩니다:
 
@@ -220,9 +246,9 @@ uv pip install -r requirements.txt
 
 1. **프론트엔드**: 사용자가 기업 선택 → 백엔드에 POST 요청
 2. **백엔드**:
-   - OpenAI API 키가 있으면: CrewAI 에이전트 실행
+   - OpenAI API 키가 있으면: 선택된 프레임워크(CrewAI/LangGraph) 에이전트 실행
    - OpenAI API 키가 없으면: 더미 데이터 반환
-3. **CrewAI 에이전트**:
+3. **AI 에이전트 (CrewAI 또는 LangGraph)**:
    - FinanceDataReader로 실시간 데이터 수집
    - 4개 에이전트가 순차적으로 분석 수행
    - 각 에이전트는 이전 에이전트의 결과를 context로 받음
@@ -233,12 +259,27 @@ uv pip install -r requirements.txt
 
 ### 실행 시간
 
-- CrewAI 에이전트 분석: 약 30초~1분 소요
+- AI 에이전트 분석 (CrewAI/LangGraph): 약 30초~1분 소요
 - 더미 데이터 모드: 즉시 응답
+
+## 프로젝트 구조
+
+```
+backend/
+├── crewai_/              # CrewAI 구현
+│   ├── crewai_agent.py
+│   └── stock_analysis_tool.py
+├── langgraph_/           # LangGraph 구현
+│   ├── langgraph_agent.py
+│   └── stock_analysis_tool.py
+├── main.py               # FastAPI 서버 (프레임워크 전환 로직 포함)
+└── requirements.txt
+```
 
 ## 향후 개발 계획
 
 - ✅ CrewAI 및 실시간 데이터 분석 연동 완료
+- ✅ LangGraph 프레임워크 추가 및 전환 기능 구현
 - 추가 종목 데이터 확장
 - 차트 및 그래프 시각화
 - PDF 레포트 다운로드 기능

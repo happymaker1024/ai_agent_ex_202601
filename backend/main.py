@@ -1,17 +1,30 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import os
 import sys
+import uuid
 from dotenv import load_dotenv
+from progress_tracker import (
+    create_progress,
+    update_progress,
+    complete_progress,
+    get_progress,
+    AnalysisProgress
+)
 
-# crewai_ 디렉토리를 Python 경로에 추가
+# crewai_ 및 langgraph_ 디렉토리를 Python 경로에 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'crewai_'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'langgraph_'))
 
 # 환경변수 로드
 load_dotenv()
+
+# 사용할 에이전트 프레임워크 설정 (환경변수로 제어 가능)
+# AGENT_FRAMEWORK: "crewai" 또는 "langgraph"
+AGENT_FRAMEWORK = os.getenv("AGENT_FRAMEWORK", "crewai").lower()
 
 app = FastAPI(title="투자 레포팅 Agent API")
 
@@ -26,6 +39,7 @@ app.add_middleware(
 
 class InvestReportRequest(BaseModel):
     company: str
+    agent_framework: Optional[str] = None  # 프론트엔드에서 선택한 agent framework
 
 
 class StockInfo(BaseModel):
@@ -59,55 +73,230 @@ class InvestReportResponse(BaseModel):
     risk_factors: List[str]
     target_price: int
     recommendation: str
+    session_id: Optional[str] = None  # 진행 상황 추적용
 
 
 @app.get("/")
 async def root():
+    mode_str = "Demo Mode"
+    if os.getenv("OPENAI_API_KEY"):
+        mode_str = f"{AGENT_FRAMEWORK.upper()}-powered"
+
     return {
         "message": "투자 레포팅 Agent API",
-        "version": "2.0.0",
-        "mode": "CrewAI-powered" if os.getenv("OPENAI_API_KEY") else "Demo Mode",
+        "version": "4.0.0",
+        "agent_framework": AGENT_FRAMEWORK,
+        "mode": mode_str,
         "endpoints": {
             "home": "/",
-            "invest_report": "/invest_report"
+            "invest_report": "/invest_report",
+            "progress": "/progress/{session_id}"
         }
     }
+
+
+@app.get("/progress/{session_id}")
+async def get_analysis_progress(session_id: str):
+    """분석 진행 상황 조회"""
+    progress = get_progress(session_id)
+
+    if not progress:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return progress
+
+
+class InvestReportStartResponse(BaseModel):
+    """분석 시작 응답"""
+    session_id: str
+    message: str
+
+
+def run_analysis_background(session_id: str, company_name: str, selected_framework: str, openai_api_key: str):
+    """백그라운드에서 분석 실행"""
+    import time
+    bg_start = time.time()
+
+    try:
+        if selected_framework == "langgraph":
+            # LangGraph를 사용한 분석
+            from langgraph_agent import InvestmentReportingGraph
+
+            print(f"\n{'='*60}")
+            print(f"[백그라운드] LangGraph 분석 시작: {company_name}")
+            print(f"[백그라운드] Session ID: {session_id}")
+            print(f"{'='*60}\n")
+
+            analysis_start = time.time()
+            graph_system = InvestmentReportingGraph(openai_api_key)
+            analysis_result = graph_system.run_analysis(company_name, session_id)
+            print(f"[백그라운드 타이밍] LangGraph 분석 완료: {time.time() - analysis_start:.2f}초")
+
+            if "error" in analysis_result:
+                complete_progress(session_id, success=False, error=analysis_result["error"])
+            else:
+                # 결과를 InvestReportResponse로 변환하여 저장
+                parse_start = time.time()
+                result_response = parse_analysis_result_to_response(company_name, analysis_result, "langgraph")
+                result_response.session_id = session_id
+                print(f"[백그라운드 타이밍] 결과 파싱: {time.time() - parse_start:.2f}초")
+
+                # Pydantic 모델을 딕셔너리로 변환하여 저장
+                dump_start = time.time()
+                result_dict = result_response.model_dump()
+                print(f"[백그라운드 타이밍] model_dump(): {time.time() - dump_start:.2f}초")
+
+                complete_start = time.time()
+                complete_progress(session_id, success=True, result=result_dict)
+                print(f"[백그라운드 타이밍] complete_progress(): {time.time() - complete_start:.2f}초")
+
+        else:  # crewai (기본값)
+            # CrewAI를 사용한 분석
+            from crewai_agent import InvestmentReportingCrew
+
+            print(f"\n{'='*60}")
+            print(f"[백그라운드] CrewAI 분석 시작: {company_name}")
+            print(f"[백그라운드] Session ID: {session_id}")
+            print(f"{'='*60}\n")
+
+            analysis_start = time.time()
+            crew_system = InvestmentReportingCrew(openai_api_key)
+            crew_result = crew_system.run_analysis(company_name, session_id)
+            print(f"[백그라운드 타이밍] ⭐ CrewAI 분석 완료: {time.time() - analysis_start:.2f}초")
+
+            if "error" in crew_result:
+                complete_progress(session_id, success=False, error=crew_result["error"])
+            else:
+                # 결과를 InvestReportResponse로 변환하여 저장
+                parse_start = time.time()
+                result_response = parse_analysis_result_to_response(company_name, crew_result, "crewai")
+                result_response.session_id = session_id
+                print(f"[백그라운드 타이밍] ⭐ 결과 파싱: {time.time() - parse_start:.2f}초")
+
+                # Pydantic 모델을 딕셔너리로 변환하여 저장
+                dump_start = time.time()
+                result_dict = result_response.model_dump()
+                print(f"[백그라운드 타이밍] ⭐ model_dump(): {time.time() - dump_start:.2f}초")
+
+                complete_start = time.time()
+                complete_progress(session_id, success=True, result=result_dict)
+                print(f"[백그라운드 타이밍] ⭐ complete_progress(): {time.time() - complete_start:.2f}초")
+
+    except Exception as e:
+        print(f"[백그라운드] {selected_framework.upper()} 분석 오류: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        complete_progress(session_id, success=False, error=str(e))
+
+    total_bg_time = time.time() - bg_start
+    print(f"\n[백그라운드 타이밍] ⭐⭐⭐ 전체 백그라운드 작업 시간: {total_bg_time:.2f}초")
+    print(f"[백그라운드] Session {session_id} 완료\n")
+
+
+@app.post("/invest_report_async")
+async def start_invest_report(request: InvestReportRequest, background_tasks: BackgroundTasks) -> InvestReportStartResponse:
+    """비동기 분석 시작 (session_id 반환)"""
+    session_id = str(uuid.uuid4())
+    selected_framework = request.agent_framework or AGENT_FRAMEWORK
+
+    # OpenAI API 키 확인
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
+
+    # 진행 상황 초기화
+    create_progress(session_id, request.company, selected_framework)
+
+    print(f"분석 시작: session_id={session_id}, company={request.company}, framework={selected_framework}")
+
+    # 백그라운드에서 분석 실행
+    background_tasks.add_task(
+        run_analysis_background,
+        session_id,
+        request.company,
+        selected_framework,
+        openai_api_key
+    )
+
+    return InvestReportStartResponse(
+        session_id=session_id,
+        message=f"{request.company} 분석을 시작합니다."
+    )
 
 
 @app.post("/invest_report", response_model=InvestReportResponse)
 async def get_invest_report(request: InvestReportRequest):
     company_name = request.company
 
+    # Session ID 생성
+    session_id = str(uuid.uuid4())
+
+    # 프론트엔드에서 선택한 agent framework (없으면 환경변수 또는 기본값 사용)
+    selected_framework = request.agent_framework or AGENT_FRAMEWORK
+    print(f"선택된 에이전트 프레임워크: {selected_framework}")
+    print(f"Session ID: {session_id}")
+
+    # 진행 상황 초기화
+    create_progress(session_id, company_name, selected_framework)
+
     # OpenAI API 키 확인
     openai_api_key = os.getenv("OPENAI_API_KEY")
 
     if openai_api_key:
-        # CrewAI를 사용한 실제 분석
+        # 선택된 프레임워크를 사용한 실제 분석
         try:
-            from crewai_agent import InvestmentReportingCrew
+            if selected_framework == "langgraph":
+                # LangGraph를 사용한 분석
+                from langgraph_agent import InvestmentReportingGraph
 
-            print(f"\n{'='*60}")
-            print(f"CrewAI 분석 시작: {company_name}")
-            print(f"{'='*60}\n")
+                print(f"\n{'='*60}")
+                print(f"LangGraph 분석 시작: {company_name}")
+                print(f"{'='*60}\n")
 
-            crew_system = InvestmentReportingCrew(openai_api_key)
-            crew_result = crew_system.run_analysis(company_name)
+                graph_system = InvestmentReportingGraph(openai_api_key)
+                analysis_result = graph_system.run_analysis(company_name, session_id)
 
-            if "error" in crew_result:
-                raise HTTPException(status_code=400, detail=crew_result["error"])
+                if "error" in analysis_result:
+                    complete_progress(session_id, success=False, error=analysis_result["error"])
+                    raise HTTPException(status_code=400, detail=analysis_result["error"])
 
-            # CrewAI 결과를 파싱하여 응답 형식으로 변환
-            # 실제로는 LLM의 출력을 파싱해야 하지만, 여기서는 간단히 더미 데이터와 결합
-            return parse_crew_result_to_response(company_name, crew_result)
+                complete_progress(session_id, success=True)
+                result = parse_analysis_result_to_response(company_name, analysis_result, "langgraph")
+                result.session_id = session_id
+                return result
+
+            else:  # crewai (기본값)
+                # CrewAI를 사용한 분석
+                from crewai_agent import InvestmentReportingCrew
+
+                print(f"\n{'='*60}")
+                print(f"CrewAI 분석 시작: {company_name}")
+                print(f"{'='*60}\n")
+
+                crew_system = InvestmentReportingCrew(openai_api_key)
+                crew_result = crew_system.run_analysis(company_name, session_id)
+
+                if "error" in crew_result:
+                    complete_progress(session_id, success=False, error=crew_result["error"])
+                    raise HTTPException(status_code=400, detail=crew_result["error"])
+
+                complete_progress(session_id, success=True)
+                result = parse_analysis_result_to_response(company_name, crew_result, "crewai")
+                result.session_id = session_id
+                return result
 
         except Exception as e:
-            print(f"CrewAI 분석 오류: {str(e)}")
+            print(f"{selected_framework.upper()} 분석 오류: {str(e)}")
             print("더미 데이터로 폴백합니다...")
+            import traceback
+            traceback.print_exc()
+            complete_progress(session_id, success=False, error=str(e))
             # 오류 발생 시 더미 데이터로 폴백
             return get_dummy_report(company_name)
     else:
         # OpenAI API 키가 없으면 더미 데이터 반환
         print(f"OPENAI_API_KEY가 설정되지 않았습니다. 더미 데이터를 반환합니다.")
+        complete_progress(session_id, success=False, error="OPENAI_API_KEY not set")
         return get_dummy_report(company_name)
 
 
@@ -138,18 +327,24 @@ def parse_stock_price_data(stock_text: str) -> Dict[str, Any]:
     return result
 
 
-def parse_crew_result_to_response(company_name: str, crew_result: Dict[str, Any]) -> InvestReportResponse:
+def parse_analysis_result_to_response(company_name: str, analysis_result: Dict[str, Any], framework: str = "unknown") -> InvestReportResponse:
     """
-    CrewAI 분석 결과를 응답 형식으로 변환합니다.
+    CrewAI 또는 LangGraph 분석 결과를 응답 형식으로 변환합니다.
+
+    Args:
+        company_name: 회사명
+        analysis_result: 분석 결과
+        framework: 사용된 프레임워크 ("crewai" 또는 "langgraph")
     """
     import re
 
-    # 기본 더미 데이터를 시작점으로 사용
-    dummy = get_dummy_report(company_name)
+    # 기본 더미 데이터를 시작점으로 사용 (딕셔너리로 변환)
+    dummy_response = get_dummy_report(company_name)
+    dummy = dummy_response.model_dump()
 
     try:
         # 실제 주가 데이터 적용
-        real_data = crew_result.get("real_data", {})
+        real_data = analysis_result.get("real_data", {})
         if real_data:
             stock_data_text = real_data.get("stock_price_data", "")
             if stock_data_text:
@@ -166,17 +361,17 @@ def parse_crew_result_to_response(company_name: str, crew_result: Dict[str, Any]
 
                     print(f"✓ 실제 주가 데이터 적용: 현재가 {dummy['stock_info']['current_price']:,}원, 변동률 {dummy['stock_info']['change_rate']}%")
 
-        # CrewAI 결과에서 분석 내용 추출
-        analysis_text = crew_result.get("analysis_result", "")
+        # 분석 결과에서 분석 내용 추출
+        analysis_text = analysis_result.get("analysis_result", "")
 
         if not analysis_text or analysis_text == "":
             print("분석 결과가 비어있습니다. 더미 데이터를 반환합니다.")
             return dummy
 
         print("\n" + "="*60)
-        print("CrewAI 분석 결과:")
+        print(f"{framework.upper()} 분석 결과:")
         print("="*60)
-        print(analysis_text)
+        print(analysis_text[:500] + "..." if len(analysis_text) > 500 else analysis_text)
         print("="*60 + "\n")
 
         # 투자의견 추출
@@ -255,14 +450,25 @@ def parse_crew_result_to_response(company_name: str, crew_result: Dict[str, Any]
                 dummy["risk_factors"] = risks[:3]
                 print(f"추출된 리스크 요인 개수: {len(risks)}")
 
-        return dummy
+        # 최종 결과 확인
+        print(f"\n[최종 반환 데이터]")
+        print(f"  회사: {dummy.get('company')}")
+        print(f"  투자의견: {dummy.get('recommendation')}")
+        print(f"  목표주가: {dummy.get('target_price')}")
+        print(f"  투자 포인트: {len(dummy.get('investment_points', []))}개")
+        print(f"  리스크 요인: {len(dummy.get('risk_factors', []))}개")
+        print(f"  현재가: {dummy.get('stock_info', {}).get('current_price')}\n")
+
+        # 딕셔너리를 InvestReportResponse 모델로 변환
+        return InvestReportResponse(**dummy)
 
     except Exception as e:
-        print(f"CrewAI 결과 파싱 중 오류 발생: {str(e)}")
+        print(f"{framework.upper()} 결과 파싱 중 오류 발생: {str(e)}")
         print("더미 데이터를 반환합니다.")
         import traceback
         traceback.print_exc()
-        return dummy
+        # 딕셔너리를 InvestReportResponse 모델로 변환
+        return InvestReportResponse(**dummy)
 
 
 def get_dummy_report(company_name: str) -> InvestReportResponse:
@@ -392,10 +598,10 @@ def get_dummy_report(company_name: str) -> InvestReportResponse:
 
     # 요청된 회사의 데이터 반환, 없으면 기본 더미 데이터 반환
     if company_name in dummy_reports:
-        return dummy_reports[company_name]
+        return InvestReportResponse(**dummy_reports[company_name])
     else:
         # 기본 더미 데이터
-        return {
+        default_data = {
             "company": company_name,
             "industry": "기타",
             "report_date": datetime.now().strftime("%Y-%m-%d"),
@@ -435,6 +641,7 @@ def get_dummy_report(company_name: str) -> InvestReportResponse:
             "target_price": 60000,
             "recommendation": "보유"
         }
+        return InvestReportResponse(**default_data)
 
 
 if __name__ == "__main__":

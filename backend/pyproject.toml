@@ -13,4 +13,7 @@ dependencies = [
     "finance-datareader>=0.9.50",
     "openai>=1.12.0",
     "python-dotenv>=1.0.0",
+    "langchain-openai>=0.3.23",
+    "langchain-core>=0.3.83",
+    "langgraph>=1.0.1",
 ]

@@ -4,23 +4,32 @@ CrewAI 기반 투자 레포팅 Agent 시스템
 """
 import os
 import sys
+import importlib.util
 from pathlib import Path
 from crewai import Agent, Task, Crew, Process
 from typing import Dict, Any
 from datetime import datetime
 
-# 현재 파일의 디렉토리를 Python path에 추가
+# 현재 디렉토리의 stock_analysis_tool을 동적으로 로드
 current_dir = Path(__file__).parent
-if str(current_dir) not in sys.path:
-    sys.path.insert(0, str(current_dir))
+tool_file = current_dir / "stock_analysis_tool.py"
 
-from stock_analysis_tool import (
-    get_stock_price_data,
-    get_company_info,
-    calculate_financial_ratios,
-    get_market_index,
-    get_ticker_from_company_name
-)
+# 모듈을 명시적으로 로드
+spec = importlib.util.spec_from_file_location("crewai_stock_analysis_tool", tool_file)
+tool_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tool_module)
+
+# Tool 함수들을 가져오기
+get_stock_price_data = tool_module.get_stock_price_data
+get_company_info = tool_module.get_company_info
+calculate_financial_ratios = tool_module.calculate_financial_ratios
+get_market_index = tool_module.get_market_index
+get_ticker_from_company_name = tool_module.get_ticker_from_company_name
+
+# Tool 타입 확인 (디버깅용)
+print(f"[CrewAI] Tool 로드 완료:")
+print(f"  get_stock_price_data 타입: {type(get_stock_price_data)}")
+print(f"  모듈: {tool_module.__name__}")
 
 
 class InvestmentReportingCrew:
@@ -235,16 +244,29 @@ class InvestmentReportingCrew:
             context=context  # 모든 이전 분석 결과를 컨텍스트로 받음
         )
 
-    def run_analysis(self, company_name: str) -> Dict[str, Any]:
+    def run_analysis(self, company_name: str, session_id: str = None) -> Dict[str, Any]:
         """
         투자 레포팅 분석을 실행합니다.
 
         Args:
             company_name: 분석할 회사명
+            session_id: 진행 상황 추적을 위한 세션 ID (선택)
 
         Returns:
             분석 결과 딕셔너리
         """
+        import time
+        overall_start = time.time()
+
+        # progress_tracker 임포트 (선택적)
+        if session_id:
+            try:
+                from progress_tracker import update_progress
+            except ImportError:
+                update_progress = None
+        else:
+            update_progress = None
+
         self.company_name = company_name
         self.ticker = get_ticker_from_company_name(company_name)
 
@@ -255,55 +277,160 @@ class InvestmentReportingCrew:
             }
 
         # 에이전트 생성
+        agent_start = time.time()
         financial_analyst = self.create_financial_analyst()
         market_analyst = self.create_market_analyst()
         risk_analyst = self.create_risk_analyst()
         investment_advisor = self.create_investment_advisor()
+        print(f"[타이밍] 에이전트 생성: {time.time() - agent_start:.2f}초")
 
         # 태스크 생성 (순차적 실행을 위한 context 설정)
+        task_start = time.time()
         task1 = self.create_financial_analysis_task(financial_analyst)
         task2 = self.create_market_analysis_task(market_analyst, context=[task1])
         task3 = self.create_risk_assessment_task(risk_analyst, context=[task1, task2])
         task4 = self.create_investment_recommendation_task(investment_advisor, context=[task1, task2, task3])
+        print(f"[타이밍] 태스크 생성: {time.time() - task_start:.2f}초")
 
         # Crew 생성 (순차적 프로세스)
+        crew_start = time.time()
         crew = Crew(
             agents=[financial_analyst, market_analyst, risk_analyst, investment_advisor],
             tasks=[task1, task2, task3, task4],
             process=Process.sequential,  # 순차적 실행
             verbose=True
         )
+        print(f"[타이밍] Crew 생성: {time.time() - crew_start:.2f}초")
 
         # 분석 실행
         print(f"\n{'='*60}")
-        print(f"투자 레포팅 분석 시작: {company_name}")
+        print(f"CrewAI 투자 레포팅 분석 시작: {company_name}")
         print(f"{'='*60}\n")
 
+        print("[진행 상황] CrewAI Crew 실행 시작")
+        print(f"- 에이전트 수: 4개")
+        print(f"- 태스크 수: 4개")
+        print(f"- 프로세스: Sequential (순차 실행)\n")
+
+        # CrewAI는 kickoff()가 블로킹되므로 별도 스레드에서 진행 상황 시뮬레이션
+        import threading
+        stop_progress_thread = threading.Event()
+
+        def simulate_progress():
+            """각 태스크를 순차적으로 in_progress로 표시"""
+            if not update_progress:
+                return
+
+            messages = [
+                ("재무 데이터 수집 및 분석 중...", 15),  # (메시지, 예상 소요 시간)
+                ("시장 동향 및 경쟁사 분석 중...", 15),
+                ("위험 요인 평가 중...", 15),
+                ("최종 투자 의견 작성 중...", 15)
+            ]
+
+            for i, (message, estimated_time) in enumerate(messages):
+                if stop_progress_thread.is_set():
+                    break
+
+                # 현재 단계를 in_progress로 표시
+                update_progress(session_id, i, "in_progress", message)
+                print(f"[진행 상황 시뮬레이션] 단계 {i + 1}/4: {message}")
+
+                # 이전 단계들을 completed로 표시
+                if i > 0:
+                    prev_messages = [
+                        "재무 분석 완료",
+                        "시장 분석 완료",
+                        "리스크 분석 완료"
+                    ]
+                    update_progress(session_id, i - 1, "completed", prev_messages[i - 1])
+
+                # 예상 소요 시간만큼 대기 (또는 작업 완료 시까지)
+                stop_progress_thread.wait(timeout=estimated_time)
+
+        # 진행 상황 시뮬레이션 스레드 시작
+        if update_progress:
+            progress_thread = threading.Thread(target=simulate_progress, daemon=True)
+            progress_thread.start()
+            print(f"[진행 상황 업데이트] CrewAI 분석 시작 - 진행 상황 추적 스레드 실행")
+
+        kickoff_start = time.time()
         result = crew.kickoff()
+        kickoff_time = time.time() - kickoff_start
+        print(f"[타이밍] ⭐ crew.kickoff() 실행: {kickoff_time:.2f}초")
+
+        # 진행 상황 시뮬레이션 스레드 종료
+        stop_progress_thread.set()
+        if update_progress:
+            progress_thread.join(timeout=1.0)
+
+        print("[진행 상황] CrewAI Crew 실행 완료")
+
+        # 모든 단계를 완료로 표시
+        progress_start = time.time()
+        if update_progress:
+            messages = [
+                "재무 분석 완료",
+                "시장 분석 완료",
+                "리스크 분석 완료",
+                "투자 의견 작성 완료"
+            ]
+            for i in range(4):
+                update_progress(session_id, i, "completed", messages[i])
+                print(f"[진행 상황 업데이트] 단계 {i + 1}/4 완료")
+        print(f"[타이밍] 진행상황 업데이트: {time.time() - progress_start:.2f}초")
+
+        print(f"\n{'='*60}")
+        print(f"[완료] CrewAI 분석이 완료되었습니다!")
+        print(f"{'='*60}\n")
+
+        # CrewAI 결과 추출 (CrewOutput 객체에서 텍스트 추출)
+        extract_start = time.time()
+        if hasattr(result, 'raw'):
+            analysis_text = result.raw
+            print(f"[결과 추출] CrewOutput.raw 사용 (길이: {len(analysis_text)} 문자)")
+        elif hasattr(result, 'output'):
+            analysis_text = result.output
+            print(f"[결과 추출] CrewOutput.output 사용 (길이: {len(analysis_text)} 문자)")
+        else:
+            analysis_text = str(result)
+            print(f"[결과 추출] str(result) 사용 (길이: {len(analysis_text)} 문자)")
+        print(f"[타이밍] 결과 추출: {time.time() - extract_start:.2f}초")
+
+        print(f"[결과 미리보기]\n{analysis_text[:300]}...\n")
 
         # 실제 주가 데이터 수집
+        data_start = time.time()
         try:
-            from stock_analysis_tool import get_stock_price_data, get_company_info, calculate_financial_ratios
-
-            # 주가 데이터 가져오기 (Tool 객체이므로 .func 사용)
-            stock_data_text = get_stock_price_data.func(self.ticker, days=30)
-            company_info_text = get_company_info.func(company_name)
-            financial_ratios_text = calculate_financial_ratios.func(self.ticker)
+            # CrewAI Tool 객체는 .run() 메서드 사용
+            stock_data_text = get_stock_price_data.run(ticker=self.ticker, days=30)
+            company_info_text = get_company_info.run(company_name=company_name)
+            financial_ratios_text = calculate_financial_ratios.run(ticker=self.ticker)
 
             real_data = {
                 "stock_price_data": stock_data_text,
                 "company_info": company_info_text,
                 "financial_ratios": financial_ratios_text
             }
+
+            print(f"[데이터 수집 완료] 실제 주가 데이터 수집 성공")
         except Exception as e:
-            print(f"실제 데이터 수집 오류: {str(e)}")
+            print(f"[오류] 실제 데이터 수집 오류: {str(e)}")
+            import traceback
+            traceback.print_exc()
             real_data = {}
+        print(f"[타이밍] 데이터 수집: {time.time() - data_start:.2f}초")
+
+        total_time = time.time() - overall_start
+        print(f"\n[타이밍] ⭐⭐ 전체 run_analysis() 실행 시간: {total_time:.2f}초")
+        print(f"  - crew.kickoff(): {kickoff_time:.2f}초 ({kickoff_time/total_time*100:.1f}%)")
+        print(f"  - 기타 작업: {total_time - kickoff_time:.2f}초 ({(total_time - kickoff_time)/total_time*100:.1f}%)\n")
 
         return {
             "company": company_name,
             "ticker": self.ticker,
             "report_date": datetime.now().strftime("%Y-%m-%d"),
-            "analysis_result": str(result),
+            "analysis_result": analysis_text,
             "real_data": real_data,
             "status": "success"
         }
