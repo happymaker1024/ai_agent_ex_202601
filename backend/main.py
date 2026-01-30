@@ -1,0 +1,442 @@
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+import os
+import sys
+from dotenv import load_dotenv
+
+# crewai_ 디렉토리를 Python 경로에 추가
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'crewai_'))
+
+# 환경변수 로드
+load_dotenv()
+
+app = FastAPI(title="투자 레포팅 Agent API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class InvestReportRequest(BaseModel):
+    company: str
+
+
+class StockInfo(BaseModel):
+    current_price: int
+    previous_close: int
+    change_rate: float
+    volume: str
+    market_cap: str
+
+
+class FinancialData(BaseModel):
+    revenue: str
+    operating_profit: str
+    net_profit: str
+    operating_margin: str
+    net_margin: str
+
+
+class InvestmentPoint(BaseModel):
+    title: str
+    content: str
+
+
+class InvestReportResponse(BaseModel):
+    company: str
+    industry: str
+    report_date: str
+    stock_info: StockInfo
+    financial_data: FinancialData
+    investment_points: List[InvestmentPoint]
+    risk_factors: List[str]
+    target_price: int
+    recommendation: str
+
+
+@app.get("/")
+async def root():
+    return {
+        "message": "투자 레포팅 Agent API",
+        "version": "2.0.0",
+        "mode": "CrewAI-powered" if os.getenv("OPENAI_API_KEY") else "Demo Mode",
+        "endpoints": {
+            "home": "/",
+            "invest_report": "/invest_report"
+        }
+    }
+
+
+@app.post("/invest_report", response_model=InvestReportResponse)
+async def get_invest_report(request: InvestReportRequest):
+    company_name = request.company
+
+    # OpenAI API 키 확인
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+
+    if openai_api_key:
+        # CrewAI를 사용한 실제 분석
+        try:
+            from crewai_agent import InvestmentReportingCrew
+
+            print(f"\n{'='*60}")
+            print(f"CrewAI 분석 시작: {company_name}")
+            print(f"{'='*60}\n")
+
+            crew_system = InvestmentReportingCrew(openai_api_key)
+            crew_result = crew_system.run_analysis(company_name)
+
+            if "error" in crew_result:
+                raise HTTPException(status_code=400, detail=crew_result["error"])
+
+            # CrewAI 결과를 파싱하여 응답 형식으로 변환
+            # 실제로는 LLM의 출력을 파싱해야 하지만, 여기서는 간단히 더미 데이터와 결합
+            return parse_crew_result_to_response(company_name, crew_result)
+
+        except Exception as e:
+            print(f"CrewAI 분석 오류: {str(e)}")
+            print("더미 데이터로 폴백합니다...")
+            # 오류 발생 시 더미 데이터로 폴백
+            return get_dummy_report(company_name)
+    else:
+        # OpenAI API 키가 없으면 더미 데이터 반환
+        print(f"OPENAI_API_KEY가 설정되지 않았습니다. 더미 데이터를 반환합니다.")
+        return get_dummy_report(company_name)
+
+
+def parse_stock_price_data(stock_text: str) -> Dict[str, Any]:
+    """주가 데이터 텍스트에서 정보 추출"""
+    import re
+    result = {}
+
+    try:
+        # 현재가 추출
+        current_price_match = re.search(r'현재가:\s*([0-9,]+)원', stock_text)
+        if current_price_match:
+            result["current_price"] = int(current_price_match.group(1).replace(',', ''))
+
+        # 전일 대비 추출
+        change_match = re.search(r'전일 대비:\s*([+-]?[0-9.]+)%', stock_text)
+        if change_match:
+            result["change_rate"] = float(change_match.group(1))
+
+        # 거래량 추출
+        volume_match = re.search(r'거래량:\s*([0-9,]+)주', stock_text)
+        if volume_match:
+            result["volume"] = volume_match.group(1)
+
+    except Exception as e:
+        print(f"주가 데이터 파싱 오류: {e}")
+
+    return result
+
+
+def parse_crew_result_to_response(company_name: str, crew_result: Dict[str, Any]) -> InvestReportResponse:
+    """
+    CrewAI 분석 결과를 응답 형식으로 변환합니다.
+    """
+    import re
+
+    # 기본 더미 데이터를 시작점으로 사용
+    dummy = get_dummy_report(company_name)
+
+    try:
+        # 실제 주가 데이터 적용
+        real_data = crew_result.get("real_data", {})
+        if real_data:
+            stock_data_text = real_data.get("stock_price_data", "")
+            if stock_data_text:
+                stock_info = parse_stock_price_data(stock_data_text)
+                if stock_info:
+                    # 실제 데이터로 업데이트
+                    if "current_price" in stock_info:
+                        dummy["stock_info"]["current_price"] = stock_info["current_price"]
+                        dummy["stock_info"]["previous_close"] = int(stock_info["current_price"] / (1 + stock_info.get("change_rate", 0) / 100))
+                    if "change_rate" in stock_info:
+                        dummy["stock_info"]["change_rate"] = stock_info["change_rate"]
+                    if "volume" in stock_info:
+                        dummy["stock_info"]["volume"] = stock_info["volume"]
+
+                    print(f"✓ 실제 주가 데이터 적용: 현재가 {dummy['stock_info']['current_price']:,}원, 변동률 {dummy['stock_info']['change_rate']}%")
+
+        # CrewAI 결과에서 분석 내용 추출
+        analysis_text = crew_result.get("analysis_result", "")
+
+        if not analysis_text or analysis_text == "":
+            print("분석 결과가 비어있습니다. 더미 데이터를 반환합니다.")
+            return dummy
+
+        print("\n" + "="*60)
+        print("CrewAI 분석 결과:")
+        print("="*60)
+        print(analysis_text)
+        print("="*60 + "\n")
+
+        # 투자의견 추출
+        recommendation_match = re.search(
+            r'투자\s*의견\s*:\s*(\S+)',
+            analysis_text,
+            re.IGNORECASE
+        )
+        if recommendation_match:
+            rec = recommendation_match.group(1).strip()
+            if '매수' in rec:
+                dummy["recommendation"] = "매수"
+            elif '매도' in rec:
+                dummy["recommendation"] = "매도"
+            else:
+                dummy["recommendation"] = "보유"
+            print(f"추출된 투자의견: {dummy['recommendation']}")
+
+        # 목표주가 추출
+        target_price_match = re.search(
+            r'목표\s*주가\s*:\s*([0-9,]+)',
+            analysis_text,
+            re.IGNORECASE
+        )
+        if target_price_match:
+            price_str = target_price_match.group(1).replace(',', '')
+            try:
+                dummy["target_price"] = int(price_str)
+                print(f"추출된 목표주가: {dummy['target_price']}")
+            except ValueError:
+                pass
+
+        # 투자 포인트 추출
+        investment_section = re.search(
+            r'투자\s*포인트\s*:\s*\n(.*?)(?=\n\n리스크|리스크\s*요인|$)',
+            analysis_text,
+            re.DOTALL | re.IGNORECASE
+        )
+
+        if investment_section:
+            points_text = investment_section.group(1)
+            points = []
+            for line in points_text.strip().split('\n'):
+                line = line.strip()
+                if line.startswith('-'):
+                    line = line[1:].strip()
+                    if ':' in line:
+                        title, content = line.split(':', 1)
+                        points.append({
+                            "title": title.strip(),
+                            "content": content.strip()
+                        })
+
+            if points:
+                dummy["investment_points"] = points[:3]
+                print(f"추출된 투자 포인트 개수: {len(points)}")
+
+        # 리스크 요인 추출
+        risk_section = re.search(
+            r'리스크\s*요인\s*:\s*\n(.*?)(?=\n\n결론|결론\s*:|$)',
+            analysis_text,
+            re.DOTALL | re.IGNORECASE
+        )
+
+        if risk_section:
+            risks_text = risk_section.group(1)
+            risks = []
+            for line in risks_text.strip().split('\n'):
+                line = line.strip()
+                if line.startswith('-'):
+                    line = line[1:].strip()
+                    if line:
+                        risks.append(line)
+
+            if risks:
+                dummy["risk_factors"] = risks[:3]
+                print(f"추출된 리스크 요인 개수: {len(risks)}")
+
+        return dummy
+
+    except Exception as e:
+        print(f"CrewAI 결과 파싱 중 오류 발생: {str(e)}")
+        print("더미 데이터를 반환합니다.")
+        import traceback
+        traceback.print_exc()
+        return dummy
+
+
+def get_dummy_report(company_name: str) -> InvestReportResponse:
+    """더미 데이터 반환 (기존 로직 유지)"""
+    dummy_reports = {
+        "삼성전자": {
+            "company": "삼성전자",
+            "industry": "반도체/전자",
+            "report_date": datetime.now().strftime("%Y-%m-%d"),
+            "stock_info": {
+                "current_price": 72500,
+                "previous_close": 71000,
+                "change_rate": 2.11,
+                "volume": "15,234,567",
+                "market_cap": "432조 원"
+            },
+            "financial_data": {
+                "revenue": "302.2조 원",
+                "operating_profit": "35.4조 원",
+                "net_profit": "26.1조 원",
+                "operating_margin": "11.7%",
+                "net_margin": "8.6%"
+            },
+            "investment_points": [
+                {
+                    "title": "메모리 반도체 시장 회복",
+                    "content": "DRAM 및 NAND 플래시 가격 상승으로 수익성 개선 예상"
+                },
+                {
+                    "title": "AI 시장 성장",
+                    "content": "HBM(고대역폭메모리) 수요 급증으로 프리미엄 제품 판매 확대"
+                },
+                {
+                    "title": "파운드리 경쟁력 강화",
+                    "content": "3nm 공정 기술 개선 및 주요 고객사 확보"
+                }
+            ],
+            "risk_factors": [
+                "글로벌 경기 둔화에 따른 수요 감소 우려",
+                "중국 반도체 업체들의 추격",
+                "환율 변동성 리스크"
+            ],
+            "target_price": 85000,
+            "recommendation": "매수"
+        },
+        "SK하이닉스": {
+            "company": "SK하이닉스",
+            "industry": "반도체",
+            "report_date": datetime.now().strftime("%Y-%m-%d"),
+            "stock_info": {
+                "current_price": 185000,
+                "previous_close": 182000,
+                "change_rate": 1.65,
+                "volume": "2,456,789",
+                "market_cap": "135조 원"
+            },
+            "financial_data": {
+                "revenue": "48.5조 원",
+                "operating_profit": "6.8조 원",
+                "net_profit": "5.2조 원",
+                "operating_margin": "14.0%",
+                "net_margin": "10.7%"
+            },
+            "investment_points": [
+                {
+                    "title": "HBM 시장 선도",
+                    "content": "HBM3E 양산으로 AI 서버 시장 공략 본격화"
+                },
+                {
+                    "title": "DRAM 점유율 확대",
+                    "content": "고부가가치 제품 비중 증가로 수익성 향상"
+                },
+                {
+                    "title": "엔비디아 파트너십",
+                    "content": "주요 고객사와의 긴밀한 협력 관계 유지"
+                }
+            ],
+            "risk_factors": [
+                "메모리 반도체 가격 변동성",
+                "삼성전자와의 경쟁 심화",
+                "설비 투자 부담 증가"
+            ],
+            "target_price": 220000,
+            "recommendation": "매수"
+        },
+        "현대차": {
+            "company": "현대차",
+            "industry": "자동차",
+            "report_date": datetime.now().strftime("%Y-%m-%d"),
+            "stock_info": {
+                "current_price": 245000,
+                "previous_close": 242000,
+                "change_rate": 1.24,
+                "volume": "1,234,567",
+                "market_cap": "52조 원"
+            },
+            "financial_data": {
+                "revenue": "162.7조 원",
+                "operating_profit": "11.6조 원",
+                "net_profit": "9.8조 원",
+                "operating_margin": "7.1%",
+                "net_margin": "6.0%"
+            },
+            "investment_points": [
+                {
+                    "title": "전기차 라인업 확대",
+                    "content": "아이오닉 시리즈 판매 호조 및 신모델 출시 예정"
+                },
+                {
+                    "title": "북미 시장 점유율 상승",
+                    "content": "SUV 및 트럭 판매 증가로 수익성 개선"
+                },
+                {
+                    "title": "배터리 기술 혁신",
+                    "content": "차세대 배터리 개발로 주행거리 경쟁력 확보"
+                }
+            ],
+            "risk_factors": [
+                "원자재 가격 상승 압력",
+                "글로벌 자동차 시장 경쟁 심화",
+                "전기차 보조금 축소 우려"
+            ],
+            "target_price": 280000,
+            "recommendation": "매수"
+        }
+    }
+
+    # 요청된 회사의 데이터 반환, 없으면 기본 더미 데이터 반환
+    if company_name in dummy_reports:
+        return dummy_reports[company_name]
+    else:
+        # 기본 더미 데이터
+        return {
+            "company": company_name,
+            "industry": "기타",
+            "report_date": datetime.now().strftime("%Y-%m-%d"),
+            "stock_info": {
+                "current_price": 50000,
+                "previous_close": 49000,
+                "change_rate": 2.04,
+                "volume": "1,000,000",
+                "market_cap": "10조 원"
+            },
+            "financial_data": {
+                "revenue": "10조 원",
+                "operating_profit": "1조 원",
+                "net_profit": "0.8조 원",
+                "operating_margin": "10.0%",
+                "net_margin": "8.0%"
+            },
+            "investment_points": [
+                {
+                    "title": "시장 성장성",
+                    "content": "해당 산업의 지속적인 성장 전망"
+                },
+                {
+                    "title": "기술 경쟁력",
+                    "content": "핵심 기술력 보유로 경쟁 우위 확보"
+                },
+                {
+                    "title": "수익성 개선",
+                    "content": "비용 절감 및 효율화를 통한 이익률 향상"
+                }
+            ],
+            "risk_factors": [
+                "시장 경쟁 심화",
+                "규제 리스크",
+                "경기 변동성"
+            ],
+            "target_price": 60000,
+            "recommendation": "보유"
+        }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

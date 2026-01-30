@@ -1,3 +1,10 @@
+.env설치정보.txt
+frontend/node_modules/
+.venv/
+.env 
+.env.example
+.vscode/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
